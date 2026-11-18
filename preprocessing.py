@@ -1,4 +1,4 @@
-# %% [markdown]
+# %% 
 # # Preprocessing
 # Interactive script (percent format): run cell by cell in VS Code, Spyder,
 # PyCharm or any editor that supports `# %%` cell markers.
@@ -6,30 +6,29 @@
 # %%
 import os
 import spacy
-
 import pandas as pd
-
 from tqdm import tqdm
 
-# %% [markdown]
-# ### Preprocess sentences annotated by Bert classifier on server
 
-# %%
+# %% ### Load the Data
+
+
+spatial_descriptions = pd.read_csv("spatial_descriptions.csv")
+reference = pd.read_csv("reference.csv")
+
+# Preprocess sentences annotated by Bert classifier on server
 gb_annotated = pd.read_csv("classifier_annotations_raw.csv")
-
 # remove potential duplicates
 gb_annotated = gb_annotated.drop_duplicates(subset=["sentence_id"])
-
-# map BERT output to actual classes
-gb_annotated['ANNOTATION'] = gb_annotated['ANNOTATION'].map({'[0]': 0, '[1]': 1})
 
 # filter to sentences that are at least 5 words long
 gb_annotated.loc[gb_annotated['length'] <= 5, 'ANNOTATION'] = 0
 
-# %% [markdown]
-# ### Count
 
 # %%
+
+### Descriptive Statistics / Corpus Size
+
 descriptions = gb_annotated[gb_annotated['ANNOTATION'] == 1]
 positive_class_ratio = len(descriptions) / len(gb_annotated)
 
@@ -42,28 +41,26 @@ ratio_per_text = gb_annotated["ANNOTATION"].eq(1).groupby(gb_annotated["text_id"
 mean_text_ratio = ratio_per_text.mean()
 print(mean_text_ratio)
 
-# %% [markdown]
+# %% 
 # ### Filter to Relevant Sentences
 #
 # - unique
 # - +/- 5 words from mean
 
-# %%
 gb_annotated = gb_annotated.drop_duplicates(subset=['sentence'], keep='first')
 
-len(gb_annotated[gb_annotated['ANNOTATION'] == 1])
 
-# %%
 spatial_descriptions_all = gb_annotated[gb_annotated['ANNOTATION'] == 1]
-median_sentence_length = int(spatial_descriptions_all['length'].median())
-print(median_sentence_length)
+print("Identified Descriptions:", len(spatial_descriptions_all))
 
+median_sentence_length = int(spatial_descriptions_all['length'].median())
+print("Median Sentence Length:", median_sentence_length)
 
 descriptions_filtered = spatial_descriptions_all[
     (spatial_descriptions_all['length'] >= median_sentence_length - 5) &
     (spatial_descriptions_all['length'] <= median_sentence_length + 5)
 ]
-print(len(descriptions_filtered))
+print("Relevant Descriptions:", len(descriptions_filtered))
 
 
 # filter reference
@@ -72,47 +69,9 @@ reference_filtered = reference_all[
     (reference_all['length'] >= median_sentence_length - 5) &
     (reference_all['length'] <= median_sentence_length + 5)
 ]
-print(len(reference_filtered))
+print("Relevant Reference Sentences:", len(reference_filtered))
 
-# %% [markdown]
-# The filtered descriptions still contain some false positives (person
-# descriptions) which were further filtered out using an LLM.
-
-# %% [markdown]
-# ### How many sentences per text do we finally consider in the analyses?
-
-# %%
-spatial_descriptions = pd.read_csv("/Users/esitter/Documents/repos/descriptions-sensory-imageability/spatial_descriptions.csv")
-reference = pd.read_csv("/Users/esitter/Documents/repos/descriptions-sensory-imageability/reference.csv")
-
-gb_annotated = pd.read_csv("/Users/esitter/Documents/repos/descriptions-sensory-imageability/classifier_annotations_raw.csv")
-gb_annotated = gb_annotated.drop_duplicates(subset=["sentence_id"])
-
-# %%
-gb_annotated["Book_ID"] = gb_annotated["sentence_id"].apply(lambda x: x.split("-")[1])
-keys = ["Book_ID", "sentence_id"]
-
-# %%
-# filtered sentences ratio (general) per text
-
-all_considered = pd.concat([spatial_descriptions, reference], ignore_index=True)
-
-for df in (gb_annotated, all_considered):
-    for k in keys:
-        df[k] = df[k].astype(str).str.strip()
-
-ga = gb_annotated[keys].drop_duplicates()
-sd = all_considered[keys].drop_duplicates()
-
-merged = ga.merge(sd, on=keys, how="left", indicator=True)
-merged["in_both"] = merged["_merge"].eq("both")
-
-ratio_per_book = merged.groupby("Book_ID")["in_both"].mean()
-mean_ratio = ratio_per_book.mean()
-
-print(mean_ratio)
-
-# %% [markdown]
+# %% 
 # ### Lemmatize
 
 # %%
@@ -143,17 +102,15 @@ def lemmatize_sentences(filtered_sentences, stopwords=stopwords, nlp=nlp):
 spatial_descriptions = lemmatize_sentences(spatial_descriptions)
 reference = lemmatize_sentences(reference)
 
-# %% [markdown]
+# %% 
 # ### Lancaster Sensorimotor Norms
 
-# %%
 lc_df = pd.read_csv("lancaster_norms.csv")  # https://link.springer.com/article/10.3758/s13428-019-01316-z
 auditory_dict = dict(zip(lc_df['Word'].str.lower(), lc_df['Auditory.mean']))
 olfactory_dict = dict(zip(lc_df['Word'].str.lower(), lc_df['Olfactory.mean']))
 visual_dict = dict(zip(lc_df['Word'].str.lower(), lc_df['Visual.mean']))
 haptic_dict = dict(zip(lc_df['Word'].str.lower(), lc_df['Haptic.mean']))
 
-# %%
 def compute_lancaster_scores(filtered_sentences, auditory_dict=auditory_dict, olfactory_dict=olfactory_dict, visual_dict=visual_dict, haptic_dict=haptic_dict):
 
     auditory_means = []
@@ -187,14 +144,13 @@ def compute_lancaster_scores(filtered_sentences, auditory_dict=auditory_dict, ol
 spatial_descriptions = compute_lancaster_scores(spatial_descriptions)
 reference = compute_lancaster_scores(reference)
 
-# %% [markdown]
+# %% 
 # ### Glasgow Imagability Norms
 
-# %%
 img_df = pd.read_csv("glasgow_norms.csv")  # https://link.springer.com/article/10.3758/s13428-018-1099-3
 img_dict = dict(zip(img_df['Word'].str.lower(), img_df['IMAG_M']))
 
-# %%
+
 def compute_glasgow_scores(filtered_sentences, img_dict=img_dict):
 
     imagability_means = []
@@ -218,11 +174,8 @@ def compute_glasgow_scores(filtered_sentences, img_dict=img_dict):
 spatial_descriptions = compute_glasgow_scores(spatial_descriptions)
 reference = compute_glasgow_scores(reference)
 
-# %% [markdown]
-# ### Descriptive Statistics
-
-# %%
-# Coverage
+# %% 
+# ### Coverage
 
 for df_name, df in [("spatial_descriptions", spatial_descriptions),
                     ("reference", reference),
@@ -231,7 +184,7 @@ for df_name, df in [("spatial_descriptions", spatial_descriptions),
     for col in ["coverage_lancaster", "coverage_glasgow"]:
         print(f"  {col}: min={df[col].min()}, mean={df[col].mean()}, max={df[col].max()}")
 
-# %%
+
 for col in ["visual_mean", "auditory_mean", "olfactory_mean", "haptic_mean", "imagability_mean"]:
     print(f"Statistics for {col}:")
     for df in [spatial_descriptions, reference]:
