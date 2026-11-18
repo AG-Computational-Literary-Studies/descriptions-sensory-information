@@ -17,7 +17,7 @@ This repository contains the supplementary material for our paper “Laying out 
 
 ## Related Resources
 
-- **German Spatial Descriptions Dataset:** [LAW2025-Descriptions](https://github.com/emilie-si/LAW2025-Descriptions)
+- **German Spatial Descriptions Dataset:** [Spatial Descriptions](https://github.com/AG-Computational-Literary-Studies/spatial-descriptions)
 
 
 ## Citation
