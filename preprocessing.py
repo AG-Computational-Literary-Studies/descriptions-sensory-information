@@ -1,196 +1,267 @@
-# %% 
+# %% [markdown]
 # # Preprocessing
+#
+# Pipeline:
+# 1. Load the corpora and the BERT-annotated sentences.
+# 2. Compute corpus statistics and the sentence-length filter.
+# 3. Lemmatize the sentences (spaCy), dropping stopwords and non-alphabetic tokens.
+# 4. Score each sentence with the Lancaster Sensorimotor Norms (four modalities)
+#    and the Glasgow Imageability Norms, plus the lexical coverage of each norm.
+# 5. Print summary statistics.
+#
 # Interactive script (percent format): run cell by cell in VS Code, Spyder,
 # PyCharm or any editor that supports `# %%` cell markers.
 
 # %%
-import os
-import spacy
 import pandas as pd
+import spacy
+from spacy.lang.en.stop_words import STOP_WORDS
 from tqdm import tqdm
 
+# %% [markdown]
+# ## Parameters
 
-# %% ### Load the Data
+# %%
+# Sentences with this many words or fewer are never treated as descriptions
+MIN_SENTENCE_LENGTH = 5
 
+# Keep sentences within +/- this many words of the median description length
+LENGTH_WINDOW = 5
 
+# %% [markdown]
+# ## Load the Data
+
+# %%
 spatial_descriptions = pd.read_csv("spatial_descriptions.csv")
 reference = pd.read_csv("reference.csv")
 
-# Preprocess sentences annotated by Bert classifier on server
+# Sentences annotated by the BERT classifier (run on a server)
 gb_annotated = pd.read_csv("classifier_annotations_raw.csv")
-# remove potential duplicates
+
+# Remove potential duplicates
 gb_annotated = gb_annotated.drop_duplicates(subset=["sentence_id"])
 
-# filter to sentences that are at least 5 words long
-gb_annotated.loc[gb_annotated['length'] <= 5, 'ANNOTATION'] = 0
+# Very short sentences (<= MIN_SENTENCE_LENGTH words) are labelled "not a description"
+gb_annotated.loc[gb_annotated["length"] <= MIN_SENTENCE_LENGTH, "ANNOTATION"] = 0
 
+# %% [markdown]
+# ## Descriptive Statistics / Corpus Size
 
 # %%
-
-### Descriptive Statistics / Corpus Size
-
-descriptions = gb_annotated[gb_annotated['ANNOTATION'] == 1]
+descriptions = gb_annotated[gb_annotated["ANNOTATION"] == 1]
 positive_class_ratio = len(descriptions) / len(gb_annotated)
 
-print(len(gb_annotated))  # complete corpus size
-print(len(descriptions))  # all positive annotations
-print(positive_class_ratio)  # ratio of spatial descriptions
+print("Complete corpus size:", len(gb_annotated))
+print("Positive annotations:", len(descriptions))
+print("Ratio of spatial descriptions:", positive_class_ratio)
 
-gb_annotated["text_id"] = gb_annotated["sentence_id"].apply(lambda x: x.split("-")[1])
-ratio_per_text = gb_annotated["ANNOTATION"].eq(1).groupby(gb_annotated["text_id"]).mean()
-mean_text_ratio = ratio_per_text.mean()
-print(mean_text_ratio)
+# Share of spatial descriptions per text, averaged over texts
+# (sentence_id format: "<prefix>-<text_id>-...")
+gb_annotated["text_id"] = gb_annotated["sentence_id"].str.split("-").str[1]
+ratio_per_text = (
+    gb_annotated["ANNOTATION"].eq(1).groupby(gb_annotated["text_id"]).mean()
+)
+print("Mean ratio per text:", ratio_per_text.mean())
 
-# %% 
-# ### Filter to Relevant Sentences
+# %% [markdown]
+# ## Filter to Relevant Sentences
 #
-# - unique
-# - +/- 5 words from mean
+# - unique sentences only
+# - length within +/- `LENGTH_WINDOW` words of the median description length
 
-gb_annotated = gb_annotated.drop_duplicates(subset=['sentence'], keep='first')
+gb_annotated = gb_annotated.drop_duplicates(subset=["sentence"], keep="first")
 
 
-spatial_descriptions_all = gb_annotated[gb_annotated['ANNOTATION'] == 1]
+def filter_by_length(sentences, center, window=LENGTH_WINDOW):
+    """Keep sentences whose length is within `center` +/- `window` words."""
+    return sentences[sentences["length"].between(center - window, center + window)]
+
+
+# Spatial descriptions (positive class)
+spatial_descriptions_all = gb_annotated[gb_annotated["ANNOTATION"] == 1]
 print("Identified Descriptions:", len(spatial_descriptions_all))
 
-median_sentence_length = int(spatial_descriptions_all['length'].median())
+median_sentence_length = int(spatial_descriptions_all["length"].median())
 print("Median Sentence Length:", median_sentence_length)
 
-descriptions_filtered = spatial_descriptions_all[
-    (spatial_descriptions_all['length'] >= median_sentence_length - 5) &
-    (spatial_descriptions_all['length'] <= median_sentence_length + 5)
-]
+descriptions_filtered = filter_by_length(spatial_descriptions_all, median_sentence_length)
 print("Relevant Descriptions:", len(descriptions_filtered))
 
-
-# filter reference
-reference_all = gb_annotated[gb_annotated['ANNOTATION'] == 0]
-reference_filtered = reference_all[
-    (reference_all['length'] >= median_sentence_length - 5) &
-    (reference_all['length'] <= median_sentence_length + 5)
-]
+# Reference sentences (negative class), filtered to the same length range
+reference_all = gb_annotated[gb_annotated["ANNOTATION"] == 0]
+reference_filtered = filter_by_length(reference_all, median_sentence_length)
 print("Relevant Reference Sentences:", len(reference_filtered))
 
-# %% 
-# ### Lemmatize
 
-# %%
+# %% [markdown]
+# ## Lemmatize
+
+# The parser and NER are not needed for lemmatization
 nlp = spacy.load("en_core_web_lg", exclude=["parser", "ner"])
-stopwords = spacy.lang.en.stop_words.STOP_WORDS
-stopwords = [w.lower() for w in stopwords]
+stopwords = {w.lower() for w in STOP_WORDS}
 
-# %%
-def lemmatize_sentences(filtered_sentences, stopwords=stopwords, nlp=nlp):
 
-    sentences_lemmatized = []
+def lemmatize_sentences(sentences, stopwords=stopwords, nlp=nlp):
+    """Add a `lemmatized_sentence` column (list of lemmas per sentence).
 
-    for sentence in tqdm(filtered_sentences['sentence'].to_list()):
+    Stopwords and tokens that are not purely alphabetic are removed.
+    Sentences that fail to process get None.
+    """
+    sentences = sentences.copy()
+    lemmatized = []
+
+    for sentence in tqdm(sentences["sentence"].to_list()):
         try:
-            doc = nlp(sentence)
-            lemmatized_sentence = [token.lemma_ for token in doc]
-            lemmatized_sentence = [token for token in lemmatized_sentence if token.lower() not in stopwords and token.isalpha()]
-            sentences_lemmatized.append(lemmatized_sentence)
+            lemmas = [token.lemma_ for token in nlp(sentence)]
+            lemmatized.append(
+                [lemma for lemma in lemmas if lemma.lower() not in stopwords and lemma.isalpha()]
+            )
         except Exception as e:
             print(f"Error processing sentence: {sentence}. Error: {e}")
-            sentences_lemmatized.append(None)
+            lemmatized.append(None)
 
-    filtered_sentences['lemmatized_sentence'] = sentences_lemmatized
-
-    return filtered_sentences
+    sentences["lemmatized_sentence"] = lemmatized
+    return sentences
 
 
 spatial_descriptions = lemmatize_sentences(spatial_descriptions)
 reference = lemmatize_sentences(reference)
 
-# %% 
-# ### Lancaster Sensorimotor Norms
+# %% [markdown]
+# ## Norm lookup helpers
 
-lc_df = pd.read_csv("lancaster_norms.csv")  # https://link.springer.com/article/10.3758/s13428-019-01316-z
-auditory_dict = dict(zip(lc_df['Word'].str.lower(), lc_df['Auditory.mean']))
-olfactory_dict = dict(zip(lc_df['Word'].str.lower(), lc_df['Olfactory.mean']))
-visual_dict = dict(zip(lc_df['Word'].str.lower(), lc_df['Visual.mean']))
-haptic_dict = dict(zip(lc_df['Word'].str.lower(), lc_df['Haptic.mean']))
+def lookup_norm(word, norms):
+    """Return the norm value for `word`, or None if the word is not covered.
 
-def compute_lancaster_scores(filtered_sentences, auditory_dict=auditory_dict, olfactory_dict=olfactory_dict, visual_dict=visual_dict, haptic_dict=haptic_dict):
+    NOTE: the word only counts as covered if its form with trailing "s"
+    characters removed is in `norms` (kept as in the original script). The
+    exact form is preferred when both forms exist. This means words such as
+    "glass" (exact form listed, stripped form "gla" not listed) are skipped.
+    If that is not intended, use instead:
+        key = word.lower()
+        if key in norms: return norms[key]
+        return norms.get(key.rstrip("s"))
+    """
+    key = word.lower()
+    stem = key.rstrip("s")
+    if stem in norms:
+        return norms[key] if key in norms else norms[stem]
+    return None
 
-    auditory_means = []
-    olfactory_means = []
-    visual_means = []
-    haptic_means = []
-    coverage_lancaster = []
 
-    for words in tqdm(filtered_sentences['lemmatized_sentence']):
-        auditory_scores = [auditory_dict[word.lower()] if word.lower() in auditory_dict else auditory_dict[word.lower().rstrip("s")] for word in words if word.lower().rstrip("s") in auditory_dict]
-        olfactory_scores = [olfactory_dict[word.lower()] if word.lower() in olfactory_dict else olfactory_dict[word.lower().rstrip("s")] for word in words if word.lower().rstrip("s") in olfactory_dict]
-        visual_scores = [visual_dict[word.lower()] if word.lower() in visual_dict else visual_dict[word.lower().rstrip("s")] for word in words if word.lower().rstrip("s") in visual_dict]
-        haptic_scores = [haptic_dict[word.lower()] if word.lower() in haptic_dict else haptic_dict[word.lower().rstrip("s")] for word in words if word.lower().rstrip("s") in haptic_dict]
+def lookup_scores(words, norms):
+    """Norm values of all covered words in a list of lemmas."""
+    scores = (lookup_norm(word, norms) for word in words)
+    return [score for score in scores if score is not None]
 
-        auditory_means.append(sum(auditory_scores) / len(auditory_scores) if auditory_scores else None)
-        olfactory_means.append(sum(olfactory_scores) / len(olfactory_scores) if olfactory_scores else None)
-        visual_means.append(sum(visual_scores) / len(visual_scores) if visual_scores else None)
-        haptic_means.append(sum(haptic_scores) / len(haptic_scores) if haptic_scores else None)
 
-        coverage_lancaster.append(len(auditory_scores) / len(words) if words else 0)
+def mean_or_none(values):
+    return sum(values) / len(values) if values else None
 
-    filtered_sentences['visual_mean'] = visual_means
-    filtered_sentences['auditory_mean'] = auditory_means
-    filtered_sentences['olfactory_mean'] = olfactory_means
-    filtered_sentences['haptic_mean'] = haptic_means
-    filtered_sentences["coverage_lancaster"] = coverage_lancaster
 
-    return filtered_sentences
+# %% [markdown]
+# ## Lancaster Sensorimotor Norms
+#
+# Source: https://link.springer.com/article/10.3758/s13428-019-01316-z
+
+lc_df = pd.read_csv("lancaster_norms.csv")
+
+# Output column -> column in the Lancaster file
+LANCASTER_COLUMNS = {
+    "auditory_mean": "Auditory.mean",
+    "olfactory_mean": "Olfactory.mean",
+    "visual_mean": "Visual.mean",
+    "haptic_mean": "Haptic.mean",
+}
+
+# One {word: rating} dictionary per modality
+lancaster_norms = {
+    out_col: dict(zip(lc_df["Word"].str.lower(), lc_df[src_col]))
+    for out_col, src_col in LANCASTER_COLUMNS.items()
+}
+
+
+def compute_lancaster_scores(sentences, norms=lancaster_norms):
+    """Add the mean rating per modality and `coverage_lancaster` to each sentence.
+
+    Coverage = share of lemmas found in the norms (based on the auditory
+    dictionary; all modalities come from the same word list).
+    """
+    sentences = sentences.copy()
+    means = {col: [] for col in norms}
+    coverage = []
+
+    for words in tqdm(sentences["lemmatized_sentence"]):
+        words = words or []  # sentences that failed lemmatization (None)
+        scores = {col: lookup_scores(words, norm) for col, norm in norms.items()}
+
+        for col in norms:
+            means[col].append(mean_or_none(scores[col]))
+        coverage.append(len(scores["auditory_mean"]) / len(words) if words else 0)
+
+    for col, values in means.items():
+        sentences[col] = values
+    sentences["coverage_lancaster"] = coverage
+    return sentences
 
 
 spatial_descriptions = compute_lancaster_scores(spatial_descriptions)
 reference = compute_lancaster_scores(reference)
 
-# %% 
-# ### Glasgow Imagability Norms
+# %% [markdown]
+# ## Glasgow Imagability Norms
+#
+# Source: https://link.springer.com/article/10.3758/s13428-018-1099-3
 
-img_df = pd.read_csv("glasgow_norms.csv")  # https://link.springer.com/article/10.3758/s13428-018-1099-3
-img_dict = dict(zip(img_df['Word'].str.lower(), img_df['IMAG_M']))
+img_df = pd.read_csv("glasgow_norms.csv")
+img_dict = dict(zip(img_df["Word"].str.lower(), img_df["IMAG_M"]))
 
 
-def compute_glasgow_scores(filtered_sentences, img_dict=img_dict):
-
+def compute_glasgow_scores(sentences, norms=img_dict):
+    """Add `imagability_mean` and `coverage_glasgow` to each sentence."""
+    sentences = sentences.copy()
     imagability_means = []
-    coverage_glasgow = []
+    coverage = []
 
-    for words in tqdm(filtered_sentences['lemmatized_sentence']):
-        img_scores = [img_dict[word.lower()] if word.lower() in img_dict else img_dict[word.lower().rstrip("s")] for word in words if word.lower().rstrip("s") in img_dict]
-        if img_scores:
-            imagability_means.append(sum(img_scores) / len(img_scores))
-            coverage_glasgow.append(len(img_scores) / len(words))
-        else:
-            imagability_means.append(None)
-            coverage_glasgow.append(0)
+    for words in tqdm(sentences["lemmatized_sentence"]):
+        words = words or []
+        scores = lookup_scores(words, norms)
+        imagability_means.append(mean_or_none(scores))
+        coverage.append(len(scores) / len(words) if words else 0)
 
-    filtered_sentences['imagability_mean'] = imagability_means
-    filtered_sentences["coverage_glasgow"] = coverage_glasgow
-
-    return filtered_sentences
+    sentences["imagability_mean"] = imagability_means
+    sentences["coverage_glasgow"] = coverage
+    return sentences
 
 
 spatial_descriptions = compute_glasgow_scores(spatial_descriptions)
 reference = compute_glasgow_scores(reference)
 
-# %% 
-# ### Coverage
+# %% [markdown]
+# ## Coverage and Summary Statistics
 
-for df_name, df in [("spatial_descriptions", spatial_descriptions),
-                    ("reference", reference),
-                    ("both", pd.concat([spatial_descriptions, reference], ignore_index=True))]:
-    print(f"Statistics for {df_name}:")
+# %%
+corpora = {
+    "spatial_descriptions": spatial_descriptions,
+    "reference": reference,
+}
+corpora_with_both = {
+    **corpora,
+    "both": pd.concat([spatial_descriptions, reference], ignore_index=True),
+}
+
+# Lexical coverage of the norms
+for name, data in corpora_with_both.items():
+    print(f"Statistics for {name}:")
     for col in ["coverage_lancaster", "coverage_glasgow"]:
-        print(f"  {col}: min={df[col].min()}, mean={df[col].mean()}, max={df[col].max()}")
+        print(f"  {col}: min={data[col].min()}, mean={data[col].mean()}, max={data[col].max()}")
 
-
+# Rating distributions per corpus
 for col in ["visual_mean", "auditory_mean", "olfactory_mean", "haptic_mean", "imagability_mean"]:
     print(f"Statistics for {col}:")
-    for df in [spatial_descriptions, reference]:
-        df_name = "spatial_descriptions" if df is spatial_descriptions else "reference"
-        min = df[col].min()
-        mean = df[col].mean()
-        max = df[col].max()
-        sd = df[col].std()
-        print(f"  {df_name}: min={min}, mean={mean}, max={max}, std={sd}")
+    for name, data in corpora.items():
+        print(
+            f"  {name}: min={data[col].min()}, mean={data[col].mean()}, "
+            f"max={data[col].max()}, std={data[col].std()}"
+        )
+
